@@ -82,5 +82,4 @@
 Flask==3.1.0
 requests==2.32.3
 fastecdsa==3.0.1
-py-ellipticcurve
 gunicorn==20.1.0
