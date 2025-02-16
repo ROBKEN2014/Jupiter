@@ -11,8 +11,8 @@ app = Flask(__name__)
 print("AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional. Não use este software em produção!")
 
 # Configuração da tarefa:
-TASK_SIZE = 10000  # 10.000 candidatos por tarefa (ajustado para testes)
-MAX_RANGE = 2**40  # Espaço total para o candidato (5 bytes): 1,099,511,627,776
+TASK_SIZE = 1000000   # 1.000.000 candidatos por tarefa
+MAX_RANGE = 2**40     # Espaço total para o candidato (5 bytes): 1,099,511,627,776
 
 # Ponteiro global para o próximo intervalo a ser distribuído
 current_range_start = 0
@@ -34,7 +34,7 @@ def load_last_assigned():
                 try:
                     current_range_start = int(line)
                 except Exception as e:
-                    print(f"Erro ao ler last_assigned_task.txt: {e}")
+                    print(f"Erro ao ler {ASSIGNED_TASKS_FILE}: {e}")
                     current_range_start = 0
     else:
         current_range_start = 0
@@ -102,16 +102,16 @@ def found():
             "##       ##     ## ##     ## ##   ### ##     ## \n"
             "##        #######   #######  ##    ## ######## \n\n"
             "hex private key:      05A96B74204279A8A3D0F5A546EC04B578292C992C40078395030B0000001DC9\n"
-            "WIF private key:      5HrnCp9FbfpHeLSXGbMNP22LLGDtF2k7yxcAdm9bzk5ighPxgKM\n"
-            "public key:           042A67B2352A1A57269BA94BEAB8BAF799D5C76DF3A5AC5DEE2B108254BD1481761452D68473028AC7DDECE16D5ACBB131AECC072CF434A854D21D96C8B3959DFF\n"
+            "WIF private key:      5JHd7vAQhVmxfDQ2HawrabA8GPJzryRNtkB5PT6YVJ5VdrWUSb2\n"
+            "public key:           04F5352540E921DAD302AA4205601AE98D2519BF77D64B582A3A490422C67BCF9C0EB9595B2C9D68CC47799C00EAB7FDBA1002DE5E450B6328DB0F6DBE57C4F0C9\n"
             "Generated address:    1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
             "Database address:     1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
             "Wallet Found!\n"
             "*********************************************************************************************************************************************************\n\n"
             "Exemplo de registro para Almost there!:\n"
             "hex private key:      05A96B74204279A8A3D0F5A546EC04B578292C992C40078395030B0000001DC9\n"
-            "WIF private key:      5HrnCp9FbfpHeLSXGbMNP22LLGDtF2k7yxcAdm9bzk5ighPxgKM\n"
-            "public key:           042A67B2352A1A57269BA94BEAB8BAF799D5C76DF3A5AC5DEE2B108254BD1481761452D68473028AC7DDECE16D5ACBB131AECC072CF434A854D21D96C8B3959DFF\n"
+            "WIF private key:      5JHd7vAQhVmxfDQ2HawrabA8GPJzryRNtkB5PT6YVJ5VdrWUSb2\n"
+            "public key:           04F5352540E921DAD302AA4205601AE98D2519BF77D64B582A3A490422C67BCF9C0EB9595B2C9D68CC47799C00EAB7FDBA1002DE5E450B6328DB0F6DBE57C4F0C9\n"
             "Generated address:    1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
             "Database address:     1JRo3dhU2X5iisG1CacsvGx8AGa26fh999\n"
             "Almost there!\n\n"
@@ -145,8 +145,8 @@ def found():
         else:
             record = (
                 "hex private key:      05A96B74204279A8A3D0F5A546EC04B578292C992C40078395030B0000001DC9\n"
-                "WIF private key:      5HrnCp9FbfpHeLSXGbMNP22LLGDtF2k7yxcAdm9bzk5ighPxgKM\n"
-                "public key:           042A67B2352A1A57269BA94BEAB8BAF799D5C76DF3A5AC5DEE2B108254BD1481761452D68473028AC7DDECE16D5ACBB131AECC072CF434A854D21D96C8B3959DFF\n"
+                "WIF private key:      5JHd7vAQhVmxfDQ2HawrabA8GPJzryRNtkB5PT6YVJ5VdrWUSb2\n"
+                "public key:           04F5352540E921DAD302AA4205601AE98D2519BF77D64B582A3A490422C67BCF9C0EB9595B2C9D68CC47799C00EAB7FDBA1002DE5E450B6328DB0F6DBE57C4F0C9\n"
                 "Generated address:    1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
                 "Database address:     1JRo3dhU2X5iisG1CacsvGx8AGa26fh999\n"
                 "Almost there!\n\n"
