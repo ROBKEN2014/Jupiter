@@ -21,7 +21,10 @@ DATABASE = r'database/11_13_2022/'  # Caminho para o banco de dados
 SERVER_URL = "https://jupiter-55e84f25b2dc.herokuapp.com"  # URL do servidor
 
 def generate_private_key_with_task(candidate):
-    """Gera uma chave privada de 32 bytes (256 bits): 27 bytes aleatórios + 5 bytes do candidate."""
+    """
+    Gera uma chave privada de 32 bytes (256 bits):
+    27 bytes aleatórios + 5 bytes representando o candidate (big-endian).
+    """
     suffix = candidate.to_bytes(5, 'big')
     random_part = os.urandom(27)
     return binascii.hexlify(random_part + suffix).decode('utf-8').upper()
@@ -74,7 +77,7 @@ def private_key_to_wif(private_key):
             pad += 1
         else:
             break
-    return alphabet[0]*pad + result
+    return alphabet[0] * pad + result
 
 def load_database(substring_length):
     """
@@ -102,7 +105,7 @@ def load_database(substring_length):
 
 def process_subrange(sub_start, sub_end, processed_counter, substring, database, verbose):
     """
-    Processa candidatos no subrange:
+    Processa os candidatos no subrange:
       - Gera chave privada, converte para chave pública e endereço.
       - Verifica se os últimos caracteres do endereço estão no banco de dados.
       - Se houver correspondência, envia os dados para o servidor (endpoint /found).
@@ -132,6 +135,7 @@ def process_subrange(sub_start, sub_end, processed_counter, substring, database,
                 print("Erro ao reportar resultado:", e)
         with processed_counter.get_lock():
             processed_counter.value += 1
+        # Sem delay para manter a eficiência
 
 def display_progress(processed_counter, total, step=5):
     """
@@ -275,4 +279,5 @@ if __name__ == '__main__':
     print("Database size:", len(database))
     print("Processos iniciados:", args["cpu_count"])
     
+    # Executa o loop principal do worker
     worker_main(database, args)
