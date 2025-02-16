@@ -10,22 +10,20 @@ import sys
 import time
 import datetime
 import requests
-import argparse
 
-# AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional.
-# Não use este software em produção!
-print("AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional. Não use este software em produção!")
+# Exibe o aviso apenas no processo principal
+if __name__ == '__main__':
+    if multiprocessing.current_process().name == "MainProcess":
+        print("AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional. Não use este software em produção!")
 
-# Diretório do banco de dados (se houver, mas geralmente ignorado ou removido)
-DATABASE = r'database/11_13_2022/'
-# URL do servidor: atualize para a URL do seu aplicativo no Heroku
-SERVER_URL = "https://jupiter-55e84f25b2dc.herokuapp.com"
+# Configurações
+DATABASE = r'database/11_13_2022/'  # Caminho para o banco de dados
+SERVER_URL = "https://jupiter-55e84f25b2dc.herokuapp.com"  # URL do servidor
 
 def generate_private_key_with_task(candidate):
     """
     Gera uma chave privada de 32 bytes onde os 27 primeiros são aleatórios e os 5 últimos
     são os bytes do candidate (big-endian).
-
     Total: 27 + 5 = 32 bytes (256 bits).
     """
     suffix = candidate.to_bytes(5, 'big')
@@ -80,11 +78,11 @@ def private_key_to_wif(private_key):
             pad += 1
         else:
             break
-    return alphabet[0]*pad + result
+    return alphabet[0] * pad + result
 
 def load_database(substring_length):
     """
-    Carrega os endereços do banco de dados (se houver) e monta um dicionário
+    Carrega os endereços do banco de dados e monta um dicionário
     onde a chave é a substring final (tamanho definido por substring_length) e o valor é o endereço completo.
     """
     database = {}
@@ -106,98 +104,129 @@ def load_database(substring_length):
     print(f"Banco de dados carregado: {len(database)} entradas.")
     return database
 
+def process_subrange(sub_start, sub_end, processed_counter, substring, database, verbose):
+    """
+    Processa os candidatos no subrange:
+      - Gera chave privada, converte para chave pública e endereço.
+      - Verifica se os últimos caracteres do endereço estão no banco de dados.
+      - Se houver correspondência, envia os dados para o servidor (endpoint /found).
+    """
+    for candidate in range(sub_start, sub_end):
+        priv_key = generate_private_key_with_task(candidate)
+        pub_key = private_key_to_public_key(priv_key, True)
+        addr = public_key_to_address(pub_key)
+        key = addr[-substring:]
+        if key in database:
+            full_db_address = database[key]
+            status = "Wallet Found!" if full_db_address == addr else "Almost there!"
+            print(f"\n{status} - Candidate: {candidate} - Address: {addr}")
+            data = {
+                "hex private key": priv_key,
+                "WIF private key": private_key_to_wif(priv_key),
+                "public key": pub_key,
+                "uncompressed address": addr,
+                "status": status,
+                "tested_candidate": candidate,
+                "substring": key,
+                "full_db_address": full_db_address
+            }
+            try:
+                requests.post(SERVER_URL + "/found", json=data, timeout=5)
+            except Exception as e:
+                print("Erro ao reportar resultado:", e)
+        with processed_counter.get_lock():
+            processed_counter.value += 1
+        # Sem delay para máxima eficiência
+
+def display_progress(processed_counter, total, step=5):
+    """
+    Exibe uma barra de progresso em cor azul que atualiza a cada 30 segundos.
+    """
+    BLUE = "\033[94m"
+    RESET = "\033[0m"
+    print(BLUE + "Monitor de progresso iniciado..." + RESET)
+    while True:
+        time.sleep(30)  # Atualiza a cada 30 segundos
+        with processed_counter.get_lock():
+            count = processed_counter.value
+        pct = int((count / total) * 100)
+        bar = "[" + "#" * (pct // 5) + " " * ((100 - pct) // 5) + "]"
+        print(BLUE + f"Progresso: {pct}% {bar}" + RESET)
+        if count >= total:
+            break
+
+def process_task(task, database, args):
+    """
+    Recebe uma tarefa (range) do servidor, divide o range entre os núcleos e processa cada subrange em paralelo.
+    Exibe a barra de progresso a cada 30 segundos.
+    """
+    task_start = int(task["start"])
+    task_end = int(task["end"])
+    total_range = task_end - task_start
+    print(f"Processando tarefa de {task_start} até {task_end} (total: {total_range} candidatos)")
+    num_workers = args["cpu_count"]
+    processed_counter = multiprocessing.Value('i', 0)
+    subranges = []
+    subrange_size = total_range // num_workers
+    for i in range(num_workers):
+        sub_start = task_start + i * subrange_size
+        sub_end = task_end if i == num_workers - 1 else sub_start + subrange_size
+        subranges.append((sub_start, sub_end))
+    pool = multiprocessing.Pool(processes=num_workers)
+    progress_proc = multiprocessing.Process(target=display_progress, args=(processed_counter, total_range))
+    progress_proc.start()
+    for sub in subranges:
+        pool.apply_async(process_subrange, args=(sub[0], sub[1], processed_counter, args["substring"], database, args["verbose"]))
+    pool.close()
+    pool.join()
+    progress_proc.join()
+    print("Tarefa completa.")
+
 def worker_main(database, args, global_counter):
     """
-    Loop principal de cada worker:
-      - Solicita um intervalo (range) ao servidor via GET /get_task.
-      - Converte os valores start e end para inteiros.
-      - Para cada candidate no intervalo, gera a chave privada (27 bytes aleatórios + 5 bytes do candidate),
-        calcula a chave pública e o endereço.
-      - Atualiza o contador global e, se houver correspondência com o banco de dados, envia os dados ao servidor.
-      - Ao concluir o intervalo, reporta a conclusão via POST /task_complete.
+    Loop principal do worker:
+      - Solicita um intervalo (range) do servidor (via GET /get_task).
+      - Processa o range recebido, dividindo-o entre os núcleos disponíveis.
+      - Reporta a conclusão da tarefa (via POST /task_complete).
+      - Solicita um novo range.
     """
     while True:
         try:
-            r = requests.get(SERVER_URL + "/get_task")
+            r = requests.get(SERVER_URL + "/get_task", timeout=5)
             if r.status_code != 200:
                 print("Nenhuma tarefa recebida, aguardando...")
                 time.sleep(5)
                 continue
             task = r.json()
-            start = int(task["start"])
-            end = int(task["end"])
+            print("Nova tarefa recebida:", task)
         except Exception as e:
             print("Erro ao obter tarefa:", e)
             time.sleep(5)
             continue
 
-        print(f"Processando range: {start} até {end}")
-        for candidate in range(start, end):
-            private_key = generate_private_key_with_task(candidate)
-            public_key = private_key_to_public_key(private_key, args['fastecdsa'])
-            address = public_key_to_address(public_key)
+        process_task(task, database, args)
 
-            with global_counter.get_lock():
-                global_counter.value += 1
-                count = global_counter.value
-
-            if count % 1048576 == 0:
-                timestamp = datetime.datetime.now().strftime("%d/%m/%Y; %H:%M:%S")
-                message = f"Carteiras testadas: {count}; {timestamp}; cpu_count={args['cpu_count']}"
-                print(message)
-
-            if args['verbose']:
-                print(f"\nChave Privada: {private_key}")
-                print(f"Chave Pública:  {public_key}")
-                print(f"Endereço:       {address}")
-
-            sub = address[-args['substring']:]
-            if sub in database:
-                full_db_address = database[sub]
-                status = "Wallet Found!" if full_db_address == address else "Almost there!"
-                print(f"\n{status}")
-                print("Generated address:".ljust(22), address)
-                print("Database address: ".ljust(22), full_db_address)
-                data = {
-                    "hex private key": private_key,
-                    "WIF private key": private_key_to_wif(private_key),
-                    "public key": public_key,
-                    "uncompressed address": address,
-                    "status": status,
-                    "tested_candidate": candidate,
-                    "substring": sub,
-                    "full_db_address": full_db_address
-                }
-                try:
-                    requests.post(SERVER_URL + "/found", json=data)
-                except Exception as e:
-                    print("Erro ao reportar resultado:", e)
         try:
-            payload = {"range": {"start": start, "end": end}, "timestamp": datetime.datetime.now().isoformat()}
-            requests.post(SERVER_URL + "/task_complete", json=payload)
-            print(f"Tarefa concluída para o range {start} a {end}")
+            payload = {"range": {"start": task["start"], "end": task["end"]}, "timestamp": datetime.datetime.now().isoformat()}
+            requests.post(SERVER_URL + "/task_complete", json=payload, timeout=5)
+            print(f"Tarefa reportada como concluída para o range {task['start']} a {task['end']}")
         except Exception as e:
             print("Erro ao reportar conclusão de tarefa:", e)
 
 def print_help():
     help_text = """
-Jupiter Worker - Distributed Bitcoin Wallet Generation (Educational)
+Jupiter Worker - Distributed Wallet Generation (Educational)
 Usage:
     python worker.py [verbose=0|1] [substring=<n>] [cpu_count=<n>]
-    
-verbose: 0 or 1 (default 0) - If 1, prints each processed address.
-substring: number of characters (from the end of the address) used for database lookup (default 8).
-cpu_count: number of worker processes to run (default: number of CPU cores).
 
-Examples:
-    python worker.py verbose=1 substring=6 cpu_count=4
-    python worker.py substring=3
+verbose: 0 or 1 (default 0) - If 1, prints detailed info.
+substring: number of characters (from the end of the address) for database lookup (default 8).
+cpu_count: number of processes to use (default: number of CPU cores).
 """
     print(help_text)
     sys.exit(0)
 
 if __name__ == '__main__':
-    # Processa argumentos da linha de comando
     args = {
         "verbose": 0,
         "substring": 8,
@@ -221,7 +250,7 @@ if __name__ == '__main__':
                 if 0 < substring < 27:
                     args["substring"] = substring
                 else:
-                    print("Invalid input for substring. Must be >0 and <27.")
+                    print("Invalid input for substring. Must be >0 and less than 27.")
                     sys.exit(-1)
             except:
                 print("Invalid input for substring.")
@@ -241,15 +270,16 @@ if __name__ == '__main__':
             print("Invalid input:", key, "\nRun 'python worker.py help' for usage")
             sys.exit(-1)
     
-    print("AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional. Não use este software em produção!")
     print("Lendo arquivos do banco de dados...")
     database = load_database(args["substring"])
+    if not database or len(database) == 0:
+        print("Erro: Banco de dados não encontrado ou vazio. Encerrando o worker.")
+        sys.exit(1)
     print("DONE")
     print("Database size:", len(database))
     print("Processos iniciados:", args["cpu_count"])
     
     global_counter = multiprocessing.Value('i', 0)
-    
     processes = []
     for i in range(args["cpu_count"]):
         p = multiprocessing.Process(target=worker_main, args=(database, args, global_counter))
