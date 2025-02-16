@@ -18,7 +18,7 @@ print("AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e ed
 # Diretório do banco de dados (como no código original)
 DATABASE = r'database/11_13_2022/'
 # Endereço do servidor que distribui as tasks
-SERVER_URL = "http://localhost:5000"
+SERVER_URL = "https://jupiter-55e84f25b2dc.herokuapp.com"
 
 def generate_private_key_with_task(candidate):
     """
