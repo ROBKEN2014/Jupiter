@@ -11,11 +11,6 @@ import time
 import datetime
 import requests
 
-# Exibe o aviso apenas no processo principal
-if __name__ == '__main__':
-    if multiprocessing.current_process().name == "MainProcess":
-        print("AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional. Não use este software em produção!")
-
 # Configurações
 DATABASE = r'database/11_13_2022/'  # Caminho para o banco de dados
 SERVER_URL = "https://jupiter-55e84f25b2dc.herokuapp.com"  # URL do servidor
@@ -24,6 +19,7 @@ def generate_private_key_with_task(candidate):
     """
     Gera uma chave privada de 32 bytes onde os 27 primeiros são aleatórios e os 5 últimos
     são os bytes do candidate (big-endian).
+
     Total: 27 + 5 = 32 bytes (256 bits).
     """
     suffix = candidate.to_bytes(5, 'big')
@@ -104,7 +100,7 @@ def load_database(substring_length):
     print(f"Banco de dados carregado: {len(database)} entradas.")
     return database
 
-def process_subrange(sub_start, sub_end, processed_counter, substring, database, verbose):
+def process_subrange(sub_start, sub_end, processed_counter, counter_lock, substring, database, verbose):
     """
     Processa os candidatos no subrange:
       - Gera chave privada, converte para chave pública e endereço.
@@ -134,23 +130,23 @@ def process_subrange(sub_start, sub_end, processed_counter, substring, database,
                 requests.post(SERVER_URL + "/found", json=data, timeout=5)
             except Exception as e:
                 print("Erro ao reportar resultado:", e)
-        with processed_counter.get_lock():
+        with counter_lock:
             processed_counter.value += 1
         # Sem delay para máxima eficiência
 
-def display_progress(processed_counter, total, step=5):
+def display_progress(processed_counter, counter_lock, total, step=5):
     """
-    Exibe uma barra de progresso em cor azul que atualiza a cada 30 segundos.
+    Exibe uma barra de progresso em cor azul a cada 30 segundos.
     """
     BLUE = "\033[94m"
     RESET = "\033[0m"
     print(BLUE + "Monitor de progresso iniciado..." + RESET)
     while True:
         time.sleep(30)  # Atualiza a cada 30 segundos
-        with processed_counter.get_lock():
+        with counter_lock:
             count = processed_counter.value
         pct = int((count / total) * 100)
-        bar = "[" + "#" * (pct // 5) + " " * ((100 - pct) // 5) + "]"
+        bar = "[" + "*" * (pct // 5) + " " * ((100 - pct) // 5) + "]"
         print(BLUE + f"Progresso: {pct}% {bar}" + RESET)
         if count >= total:
             break
@@ -165,7 +161,12 @@ def process_task(task, database, args):
     total_range = task_end - task_start
     print(f"Processando tarefa de {task_start} até {task_end} (total: {total_range} candidatos)")
     num_workers = args["cpu_count"]
-    processed_counter = multiprocessing.Value('i', 0)
+
+    # Cria um Manager para o contador e um lock para sincronização
+    manager = multiprocessing.Manager()
+    processed_counter = manager.Value('i', 0)
+    counter_lock = manager.Lock()
+    
     subranges = []
     subrange_size = total_range // num_workers
     for i in range(num_workers):
@@ -173,10 +174,10 @@ def process_task(task, database, args):
         sub_end = task_end if i == num_workers - 1 else sub_start + subrange_size
         subranges.append((sub_start, sub_end))
     pool = multiprocessing.Pool(processes=num_workers)
-    progress_proc = multiprocessing.Process(target=display_progress, args=(processed_counter, total_range))
+    progress_proc = multiprocessing.Process(target=display_progress, args=(processed_counter, counter_lock, total_range))
     progress_proc.start()
     for sub in subranges:
-        pool.apply_async(process_subrange, args=(sub[0], sub[1], processed_counter, args["substring"], database, args["verbose"]))
+        pool.apply_async(process_subrange, args=(sub[0], sub[1], processed_counter, counter_lock, args["substring"], database, args["verbose"]))
     pool.close()
     pool.join()
     progress_proc.join()
@@ -186,9 +187,9 @@ def worker_main(database, args, global_counter):
     """
     Loop principal do worker:
       - Solicita um intervalo (range) do servidor (via GET /get_task).
-      - Processa o range recebido, dividindo-o entre os núcleos disponíveis.
+      - Divide o range entre todos os núcleos e processa-o.
       - Reporta a conclusão da tarefa (via POST /task_complete).
-      - Solicita um novo range.
+      - Solicita um novo intervalo.
     """
     while True:
         try:
@@ -207,7 +208,8 @@ def worker_main(database, args, global_counter):
         process_task(task, database, args)
 
         try:
-            payload = {"range": {"start": task["start"], "end": task["end"]}, "timestamp": datetime.datetime.now().isoformat()}
+            payload = {"range": {"start": task["start"], "end": task["end"]},
+                       "timestamp": datetime.datetime.now().isoformat()}
             requests.post(SERVER_URL + "/task_complete", json=payload, timeout=5)
             print(f"Tarefa reportada como concluída para o range {task['start']} a {task['end']}")
         except Exception as e:
@@ -221,7 +223,7 @@ Usage:
 
 verbose: 0 or 1 (default 0) - If 1, prints detailed info.
 substring: number of characters (from the end of the address) for database lookup (default 8).
-cpu_count: number of processes to use (default: number of CPU cores).
+cpu_count: number of worker processes to use (default: number of CPU cores).
 """
     print(help_text)
     sys.exit(0)
@@ -280,12 +282,5 @@ if __name__ == '__main__':
     print("Processos iniciados:", args["cpu_count"])
     
     global_counter = multiprocessing.Value('i', 0)
-    processes = []
-    for i in range(args["cpu_count"]):
-        p = multiprocessing.Process(target=worker_main, args=(database, args, global_counter))
-        p.start()
-        processes.append(p)
-        print(f"Iniciado worker {i+1}")
-    
-    for p in processes:
-        p.join()
+    # Agora, todos os núcleos trabalharão juntos em uma única tarefa
+    worker_main(database, args, global_counter)
