@@ -1,2 +1,0 @@
-Carteiras testadas: 1048576; 16/02/2025; 01:36:14; cpu_count=4
-Carteiras testadas: 2097152; 16/02/2025; 01:44:42; cpu_count=4
