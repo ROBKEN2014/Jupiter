@@ -1,2 +1,2 @@
 # Ignorar a pasta worker inteira
-worker/
+worker/database/
