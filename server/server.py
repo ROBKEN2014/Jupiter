@@ -1,157 +1,172 @@
-# server.py
-from flask import Flask, request, jsonify
-import threading
 import os
 import datetime
+from flask import Flask, request, jsonify
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 app = Flask(__name__)
 
-# AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional.
-# Não use este software em produção!
-print("AVISO: Projeto Jupiter - Este é um projeto para fins de aprendizado e educacional. Não use este software em produção!")
+# Obtém a URL do banco a partir da variável de ambiente (definida pelo Heroku)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
 
-# Configuração da tarefa:
-TASK_SIZE = 1000000   # 1.000.000 candidatos por tarefa
-MAX_RANGE = 2**40     # Espaço total para o candidato (5 bytes): 1,099,511,627,776
+# MODELOS
+class Task(Base):
+    __tablename__ = "tasks"
+    id = Column(Integer, primary_key=True, index=True)
+    range_start = Column(String, nullable=False)
+    range_end = Column(String, nullable=False)
+    assigned_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    status = Column(String, default="pending")
 
-# Ponteiro global para o próximo intervalo a ser distribuído
-current_range_start = 0
+class Metadata(Base):
+    __tablename__ = "metadata"
+    key = Column(String, primary_key=True, index=True)
+    value = Column(String)
 
-# Arquivos para persistência
-COMPLETED_TASKS_FILE = "tasks_completed.txt"
-ASSIGNED_TASKS_FILE = "last_assigned_task.txt"
-RESULTS_FILE = "resultados.txt"
+class FoundWallet(Base):
+    __tablename__ = "found_wallets"
+    id = Column(Integer, primary_key=True, index=True)
+    hex_private_key = Column(String)
+    wif_private_key = Column(String)
+    public_key = Column(String)
+    uncompressed_address = Column(String)
+    full_db_address = Column(String)
+    status = Column(String)
+    tested_candidate = Column(Integer)
+    substring = Column(String)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
 
-# Lock para sincronização de acesso
-task_lock = threading.Lock()
+# Cria as tabelas, se não existirem
+Base.metadata.create_all(bind=engine)
 
-def load_last_assigned():
-    global current_range_start
-    if os.path.exists(ASSIGNED_TASKS_FILE):
-        with open(ASSIGNED_TASKS_FILE, "r") as f:
-            line = f.read().strip()
-            if line:
-                try:
-                    current_range_start = int(line)
-                except Exception as e:
-                    print(f"Erro ao ler {ASSIGNED_TASKS_FILE}: {e}")
-                    current_range_start = 0
-    else:
-        current_range_start = 0
+# Funções auxiliares para conversão
+def hex_to_int(hex_str):
+    return int(hex_str, 16)
 
-def save_last_assigned(value):
-    with open(ASSIGNED_TASKS_FILE, "w") as f:
-        f.write(str(value))
+def int_to_hex(value):
+    return hex(value)[2:].upper().zfill(64)
 
-# Carrega o último valor atribuído ao iniciar o servidor
-load_last_assigned()
+# Recupera o último valor atribuído (se não existir, inicializa com 64 zeros)
+def get_last_assigned(db):
+    meta = db.query(Metadata).filter(Metadata.key == "last_assigned").first()
+    if meta is None:
+        meta = Metadata(key="last_assigned", value="0" * 64)
+        db.add(meta)
+        db.commit()
+        db.refresh(meta)
+    return meta.value
 
+def update_last_assigned(db, new_value):
+    meta = db.query(Metadata).filter(Metadata.key == "last_assigned").first()
+    if meta:
+        meta.value = new_value
+        db.commit()
+
+# Constantes
+TASK_SIZE = 100         # Para testes; ajuste conforme necessário.
+TIMEOUT_SECONDS = 60    # Tempo limite para reatribuição de tarefas.
+MAX_VALUE = 2 ** 256
+
+def get_next_task():
+    db = SessionLocal()
+    now = datetime.datetime.utcnow()
+    # Procura tarefas em "processing" que excederam o timeout
+    task = (
+        db.query(Task)
+        .filter(Task.status == "processing", Task.assigned_at <= (now - datetime.timedelta(seconds=TIMEOUT_SECONDS)))
+        .first()
+    )
+    if task:
+        task.assigned_at = now
+        db.commit()
+        task_data = {"id": task.id, "start": task.range_start, "end": task.range_end}
+        db.close()
+        return task_data
+
+    # Caso não haja tarefa pendente para reatribuição, cria uma nova tarefa
+    last_assigned = get_last_assigned(db)
+    last_int = hex_to_int(last_assigned)
+    new_end_int = last_int + TASK_SIZE
+    if new_end_int > MAX_VALUE:
+        db.close()
+        return None
+    range_start = int_to_hex(last_int)
+    range_end = int_to_hex(new_end_int)
+    new_task = Task(range_start=range_start, range_end=range_end, assigned_at=now, status="processing")
+    db.add(new_task)
+    db.commit()
+    task_id = new_task.id
+    update_last_assigned(db, range_end)
+    db.close()
+    return {"id": task_id, "start": range_start, "end": range_end}
+
+# Endpoints
 @app.route('/')
 def index():
-    return "Projeto Jupiter - Servidor online para processamento de carteiras. Use /get_task para obter uma tarefa."
+    return "Servidor do Projeto Jupiter com Heroku Postgres"
 
-@app.route('/get_task', methods=['GET'])
+@app.route('/get_task', methods=["GET"])
 def get_task():
-    """
-    Distribui um intervalo (range) de tarefas para um worker.
-    """
-    global current_range_start
-    with task_lock:
-        if current_range_start >= MAX_RANGE:
-            return jsonify({"message": "No more tasks available"}), 404
-        start = current_range_start
-        end = start + TASK_SIZE
-        current_range_start = end
-        save_last_assigned(current_range_start)
-    print(f"Assigned task range: {start} to {end}")
-    return jsonify({"start": str(start), "end": str(end)})
+    task = get_next_task()
+    if task is None:
+        return jsonify({"message": "No more tasks available"}), 404
+    return jsonify({"task_id": task["id"], "start": task["start"], "end": task["end"]})
 
-@app.route('/task_complete', methods=['POST'])
+@app.route('/task_complete', methods=["POST"])
 def task_complete():
-    """
-    Recebe e registra um intervalo concluído pelo worker.
-    """
-    data = request.json
-    with open(COMPLETED_TASKS_FILE, "a") as f:
-        f.write(f"{data['range']['start']},{data['range']['end']}\n")
-    print("Completed task:", data)
-    return jsonify({"message": "Task completion recorded"})
+    data = request.get_json()
+    task_id = data.get("task_id")
+    if not task_id:
+        return jsonify({"error": "task_id is required"}), 400
+    db = SessionLocal()
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task:
+        task.status = "completed"
+        task.completed_at = datetime.datetime.utcnow()
+        db.commit()
+    db.close()
+    return jsonify({"message": "Task marked as completed", "task_id": task_id})
 
-@app.route('/found', methods=['POST'])
+@app.route('/tasks_status', methods=["GET"])
+def tasks_status():
+    db = SessionLocal()
+    tasks = db.query(Task).order_by(Task.id).all()
+    tasks_list = []
+    for t in tasks:
+        tasks_list.append({
+            "id": t.id,
+            "range_start": t.range_start,
+            "range_end": t.range_end,
+            "status": t.status,
+            "assigned_at": t.assigned_at.isoformat() if t.assigned_at else None,
+            "completed_at": t.completed_at.isoformat() if t.completed_at else None
+        })
+    db.close()
+    return jsonify(tasks_list)
+
+@app.route('/found', methods=["POST"])
 def found():
-    """
-    Recebe os dados de uma carteira encontrada (ou quase encontrada) e grava os resultados
-    no arquivo 'resultados.txt' com os campos alinhados.
-    Se o arquivo não existir, cria-o com um cabeçalho.
-    """
-    data = request.json
-    if not os.path.exists(RESULTS_FILE):
-        header = (
-            "#################### CABEÇALHO DE EXEMPLO ####################\n\n"
-            "Exemplo de registro para Wallet Found!:\n"
-            "*********************************************************************************************************************************************************\n"
-            "*********************************************************************************************************************************************************\n"
-            "*********************************************************************************************************************************************************\n"
-            "*********************************************************************************************************************************************************\n"
-            "*********************************************************************************************************************************************************\n\n"
-            "########  #######  ##     ## ##    ## ########  \n"
-            "##       ##     ## ##     ## ###   ## ##     ## \n"
-            "##       ##     ## ##     ## ####  ## ##     ## \n"
-            "######   ##     ## ##     ## ## ## ## ##     ## \n"
-            "##       ##     ## ##     ## ##  #### ##     ## \n"
-            "##       ##     ## ##     ## ##   ### ##     ## \n"
-            "##        #######   #######  ##    ## ######## \n\n"
-            "hex private key:      05A96B74204279A8A3D0F5A546EC04B578292C992C40078395030B0000001DC9\n"
-            "WIF private key:      5JHd7vAQhVmxfDQ2HawrabA8GPJzryRNtkB5PT6YVJ5VdrWUSb2\n"
-            "public key:           04F5352540E921DAD302AA4205601AE98D2519BF77D64B582A3A490422C67BCF9C0EB9595B2C9D68CC47799C00EAB7FDBA1002DE5E450B6328DB0F6DBE57C4F0C9\n"
-            "Generated address:    1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
-            "Database address:     1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
-            "Wallet Found!\n"
-            "*********************************************************************************************************************************************************\n\n"
-            "Exemplo de registro para Almost there!:\n"
-            "hex private key:      05A96B74204279A8A3D0F5A546EC04B578292C992C40078395030B0000001DC9\n"
-            "WIF private key:      5JHd7vAQhVmxfDQ2HawrabA8GPJzryRNtkB5PT6YVJ5VdrWUSb2\n"
-            "public key:           04F5352540E921DAD302AA4205601AE98D2519BF77D64B582A3A490422C67BCF9C0EB9595B2C9D68CC47799C00EAB7FDBA1002DE5E450B6328DB0F6DBE57C4F0C9\n"
-            "Generated address:    1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
-            "Database address:     1JRo3dhU2X5iisG1CacsvGx8AGa26fh999\n"
-            "Almost there!\n\n"
-        )
-        with open(RESULTS_FILE, "w") as f:
-            f.write(header)
-    print(">>> Carteira encontrada:")
-    generated_address = data.get("uncompressed address", "None")
-    full_db_address = data.get("full_db_address", "None")
-    print("Generated address:".ljust(22) + generated_address)
-    print("Database address: ".ljust(22) + full_db_address)
-    
-    with open(RESULTS_FILE, "a") as f:
-        if data.get("status") == "Wallet Found!":
-            banner = (
-                "\n" + "*" * 150 + "\n" +
-                "*" * 150 + "\n" +
-                "*" * 150 + "\n" +
-                "*" * 150 + "\n" +
-                "*" * 150 + "\n\n"
-            )
-            record = (
-                f"hex private key:      {data.get('hex private key')}\n"
-                f"WIF private key:      {data.get('WIF private key')}\n"
-                f"public key:           {data.get('public key')}\n"
-                f"Generated address:    {generated_address}\n"
-                f"Database address:     {full_db_address}\n"
-                f"{data.get('status')}\n"
-            )
-            f.write(banner + record + "*" * 150 + "\n")
-        else:
-            record = (
-                "hex private key:      05A96B74204279A8A3D0F5A546EC04B578292C992C40078395030B0000001DC9\n"
-                "WIF private key:      5JHd7vAQhVmxfDQ2HawrabA8GPJzryRNtkB5PT6YVJ5VdrWUSb2\n"
-                "public key:           04F5352540E921DAD302AA4205601AE98D2519BF77D64B582A3A490422C67BCF9C0EB9595B2C9D68CC47799C00EAB7FDBA1002DE5E450B6328DB0F6DBE57C4F0C9\n"
-                "Generated address:    1JRo3dhU2X5iisG1CacsvGx8AGa26fhD3p\n"
-                "Database address:     1JRo3dhU2X5iisG1CacsvGx8AGa26fh999\n"
-                "Almost there!\n\n"
-            )
-            f.write(record)
+    data = request.get_json()
+    db = SessionLocal()
+    new_found = FoundWallet(
+        hex_private_key=data.get("hex private key"),
+        wif_private_key=data.get("WIF private key"),
+        public_key=data.get("public key"),
+        uncompressed_address=data.get("uncompressed address"),
+        full_db_address=data.get("full_db_address"),
+        status=data.get("status"),
+        tested_candidate=data.get("tested_candidate"),
+        substring=data.get("substring"),
+        timestamp=datetime.datetime.utcnow()
+    )
+    db.add(new_found)
+    db.commit()
+    db.close()
     return jsonify({"message": "Wallet result recorded"})
 
 if __name__ == '__main__':

@@ -1,27 +1,21 @@
-# worker.py
-from fastecdsa import keys, curve
-from ellipticcurve.privateKey import PrivateKey
-import platform
-import multiprocessing
-import hashlib
-import binascii
 import os
 import sys
 import time
 import datetime
+import platform
+import multiprocessing
+import hashlib
+import binascii
 import requests
 
+from fastecdsa import keys, curve
+from ellipticcurve.privateKey import PrivateKey
+
 # Configurações
-DATABASE = r'database/11_13_2022/'  # Caminho para o banco de dados
+DATABASE = r'database/11_13_2022/'  # Caminho para o banco de dados local (para lookup)
 SERVER_URL = "https://jupiter-55e84f25b2dc.herokuapp.com"  # URL do servidor
 
 def generate_private_key_with_task(candidate):
-    """
-    Gera uma chave privada de 32 bytes onde os 27 primeiros são aleatórios e os 5 últimos
-    são os bytes do candidate (big-endian).
-
-    Total: 27 + 5 = 32 bytes (256 bits).
-    """
     suffix = candidate.to_bytes(5, 'big')
     random_part = os.urandom(27)
     return binascii.hexlify(random_part + suffix).decode('utf-8').upper()
@@ -45,7 +39,12 @@ def public_key_to_address(public_key):
     var_encoded = ('00' + ripemd160.hexdigest()).encode()
     digest = hashlib.sha256(binascii.unhexlify(var_encoded)).digest()
     var_hex = '00' + ripemd160.hexdigest() + hashlib.sha256(digest).hexdigest()[0:8]
-    count = [char != '0' for char in var_hex].index(True) // 2
+    count = 0
+    for i in range(0, len(var_hex), 2):
+        if var_hex[i:i+2] == "00":
+            count += 1
+        else:
+            break
     n = int(var_hex, 16)
     while n > 0:
         n, remainder = divmod(n, 58)
@@ -77,10 +76,6 @@ def private_key_to_wif(private_key):
     return alphabet[0] * pad + result
 
 def load_database(substring_length):
-    """
-    Carrega os endereços do banco de dados e monta um dicionário
-    onde a chave é a substring final (tamanho definido por substring_length) e o valor é o endereço completo.
-    """
     database = {}
     if not os.path.isdir(DATABASE):
         print(f"Diretório do banco de dados não encontrado: {DATABASE}")
@@ -101,12 +96,6 @@ def load_database(substring_length):
     return database
 
 def process_subrange(sub_start, sub_end, processed_counter, counter_lock, substring, database, verbose):
-    """
-    Processa os candidatos no subrange:
-      - Gera chave privada, converte para chave pública e endereço.
-      - Verifica se os últimos caracteres do endereço estão no banco de dados.
-      - Se houver correspondência, envia os dados para o servidor (endpoint /found).
-    """
     for candidate in range(sub_start, sub_end):
         priv_key = generate_private_key_with_task(candidate)
         pub_key = private_key_to_public_key(priv_key, True)
@@ -132,17 +121,13 @@ def process_subrange(sub_start, sub_end, processed_counter, counter_lock, substr
                 print("Erro ao reportar resultado:", e)
         with counter_lock:
             processed_counter.value += 1
-        # Sem delay para máxima eficiência
 
 def display_progress(processed_counter, counter_lock, total, step=5):
-    """
-    Exibe uma barra de progresso em cor azul a cada 30 segundos.
-    """
     BLUE = "\033[94m"
     RESET = "\033[0m"
     print(BLUE + "Monitor de progresso iniciado..." + RESET)
     while True:
-        time.sleep(30)  # Atualiza a cada 30 segundos
+        time.sleep(30)
         with counter_lock:
             count = processed_counter.value
         pct = int((count / total) * 100)
@@ -152,21 +137,16 @@ def display_progress(processed_counter, counter_lock, total, step=5):
             break
 
 def process_task(task, database, args):
-    """
-    Recebe uma tarefa (range) do servidor, divide o range entre os núcleos e processa cada subrange em paralelo.
-    Exibe a barra de progresso a cada 30 segundos.
-    """
-    task_start = int(task["start"])
-    task_end = int(task["end"])
+    task_start = int(task["start"], 16)
+    task_end = int(task["end"], 16)
     total_range = task_end - task_start
-    print(f"Processando tarefa de {task_start} até {task_end} (total: {total_range} candidatos)")
+    print(f"Processando tarefa de {task['start']} até {task['end']} (total: {total_range} candidatos)")
     num_workers = args["cpu_count"]
 
-    # Cria um Manager para o contador e um lock para sincronização
     manager = multiprocessing.Manager()
     processed_counter = manager.Value('i', 0)
     counter_lock = manager.Lock()
-    
+
     subranges = []
     subrange_size = total_range // num_workers
     for i in range(num_workers):
@@ -183,14 +163,7 @@ def process_task(task, database, args):
     progress_proc.join()
     print("Tarefa completa.")
 
-def worker_main(database, args, global_counter):
-    """
-    Loop principal do worker:
-      - Solicita um intervalo (range) do servidor (via GET /get_task).
-      - Divide o range entre todos os núcleos e processa-o.
-      - Reporta a conclusão da tarefa (via POST /task_complete).
-      - Solicita um novo intervalo.
-    """
+def worker_main(database, args):
     while True:
         try:
             r = requests.get(SERVER_URL + "/get_task", timeout=5)
@@ -208,10 +181,9 @@ def worker_main(database, args, global_counter):
         process_task(task, database, args)
 
         try:
-            payload = {"range": {"start": task["start"], "end": task["end"]},
-                       "timestamp": datetime.datetime.now().isoformat()}
+            payload = {"task_id": task["task_id"]}
             requests.post(SERVER_URL + "/task_complete", json=payload, timeout=5)
-            print(f"Tarefa reportada como concluída para o range {task['start']} a {task['end']}")
+            print(f"Tarefa reportada como concluída (task_id: {task['task_id']})")
         except Exception as e:
             print("Erro ao reportar conclusão de tarefa:", e)
 
@@ -221,9 +193,9 @@ Jupiter Worker - Distributed Wallet Generation (Educational)
 Usage:
     python worker.py [verbose=0|1] [substring=<n>] [cpu_count=<n>]
 
-verbose: 0 or 1 (default 0) - If 1, prints detailed info.
-substring: number of characters (from the end of the address) for database lookup (default 8).
-cpu_count: number of worker processes to use (default: number of CPU cores).
+verbose: 0 or 1 (default 0) - Se 1, imprime informações detalhadas.
+substring: número de caracteres (do final do endereço) para lookup no banco de dados (default 8).
+cpu_count: número de processos (default: núcleos disponíveis).
 """
     print(help_text)
     sys.exit(0)
@@ -271,7 +243,7 @@ if __name__ == '__main__':
         else:
             print("Invalid input:", key, "\nRun 'python worker.py help' for usage")
             sys.exit(-1)
-    
+
     print("Lendo arquivos do banco de dados...")
     database = load_database(args["substring"])
     if not database or len(database) == 0:
@@ -280,7 +252,5 @@ if __name__ == '__main__':
     print("DONE")
     print("Database size:", len(database))
     print("Processos iniciados:", args["cpu_count"])
-    
-    global_counter = multiprocessing.Value('i', 0)
-    # Agora, todos os núcleos trabalharão juntos em uma única tarefa
-    worker_main(database, args, global_counter)
+
+    worker_main(database, args)
